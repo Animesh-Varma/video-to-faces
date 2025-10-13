@@ -86,13 +86,24 @@ def classify_faces(paths, X, model, classif_params):
     print('Grouped %u images into %u folders:' % (len(paths), len(classes)))
     for i in range(len(classes)):
         print(classes[i] + ': ' + str(np.count_nonzero(inds == i)))
-    print()        
+    print()
 
 
 def cluster_faces(paths, X, cluster_params):
     clusters, save_all, rstate, log, out_dir = cluster_params
-    # leaving only n_clusters <= number of samples (most likely will be all for non-test cases)
-    clusters = [c for c in clusters if c <= len(paths)]
+
+    # Silhouette score requires: 2 <= n_clusters <= n_samples - 1
+    n_samples = len(paths)
+    clusters = [c for c in clusters if 2 <= c < n_samples]
+
+    # Add check for minimum samples
+    if n_samples < 2:
+        print(f'Warning: Only {n_samples} sample(s). Skipping clustering.')
+        return
+
+    if not clusters:
+        print(f'Warning: Cannot cluster {n_samples} samples. Need at least 3 samples.')
+        return
 
     print('Clustering images into %s groups' % ', '.join([str(cl) for cl in clusters]))
     labels = []
@@ -113,7 +124,7 @@ def cluster_faces(paths, X, cluster_params):
                 f.write('%u,%s,%s,%s\n' % score)
 
     if not save_all:
-        best_k = max(scores, key=lambda x:x[1])[0]
+        best_k = max(scores, key=lambda x: x[1])[0]
         i = clusters.index(best_k)
         clusters = [clusters[i]]
         labels = [labels[i]]
