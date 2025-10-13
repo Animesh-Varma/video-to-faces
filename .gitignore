@@ -7,3 +7,4 @@ __pycache__/
 weights/
 datasets/
 /faces_output/
+/faces_db.sqlite
