@@ -1,3 +1,4 @@
+
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
@@ -58,7 +59,8 @@ def get_all_data():
             v.filename AS video_filename,
             v.filepath AS video_filepath,
             f.timestamp_seconds,
-            COALESCE(f.person_name, 'Cluster ' || f.cluster_id) AS name
+            COALESCE(f.person_name, 'Cluster ' || f.cluster_id) AS name,
+            v.upload_date
         FROM faces f
         JOIN videos v ON f.video_id = v.id
     """
@@ -73,10 +75,10 @@ def format_timestamp(seconds):
     seconds = int(seconds % 60)
     return f"{minutes:02d}:{seconds:02d}"
 
-def create_html_grid(df):
+def create_gallery_html(df, cols):
     if df.empty:
-        return "<p>No faces to display.</p>"
-    html = "<div style='display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px;'>"
+        return ""
+    html = f"<div style='display: grid; grid-template-columns: repeat({cols}, 1fr); gap: 10px;'>"
     for _, row in df.iterrows():
         try:
             with open(row['face_image_path'], 'rb') as img_file:
@@ -85,19 +87,15 @@ def create_html_grid(df):
         except (FileNotFoundError, TypeError):
             image_data = ""
 
-        video_link = f"/files/{urllib.parse.quote(row['video_filepath'])}#t={int(row['timestamp_seconds'])}"
         html += f"""
             <div style='border: 1px solid #ddd; padding: 5px; text-align: center;'>
-                <img src='{image_data}' width='150' height='150' style='object-fit: cover;' alt='{row['face_id']}'>
-                <p style='font-size: 12px; margin: 5px 0 0 0;'>{row['video_filename']}</p>
-                <a href='{video_link}' target='_blank' style='font-size: 12px;'>{format_timestamp(row['timestamp_seconds'])}</a>
-                <p style='font-size: 12px; margin: 5px 0 0 0;'>{row['name']}</p>
+                <img src='{image_data}' width='150' height='150' style='object-fit: contain;'>
             </div>
         """
     html += "</div>"
     return html
 
-def process_video(video_path, style):
+def process_video(video_path, style, cols):
     output_dir = "faces_output"
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -134,16 +132,7 @@ def process_video(video_path, style):
     conn.commit()
     conn.close()
 
-    df = get_all_data()
-    return create_html_grid(df), gr.update(choices=["All"] + list(df['video_filename'].unique())), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()]), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()])
-
-def filter_faces(video_filter, name_filter):
-    df = get_all_data()
-    if video_filter != "All":
-        df = df[df['video_filename'] == video_filter]
-    if name_filter:
-        df = df[df['name'].str.contains(name_filter, case=False, na=False)]
-    return create_html_grid(df)
+    return update_galleries(cols)
 
 def rename_face(face_id, new_name):
     if not face_id or not new_name:
@@ -181,20 +170,24 @@ init_db()
 
 with gr.Blocks() as demo:
     gr.Markdown("# Video to Faces")
+
+    with gr.Tab("Organization"):
+        with gr.Row():
+            cols_dropdown = gr.Dropdown(label="Columns", choices=[3, 5, 8, 10], value=5)
+        with gr.Tabs():
+            with gr.TabItem("By Person"):
+                person_galleries = gr.HTML()
+            with gr.TabItem("By Video"):
+                video_galleries = gr.HTML()
+            with gr.TabItem("Chronological"):
+                chrono_gallery = gr.HTML()
+
     with gr.Tab("Process Videos"):
         with gr.Row():
             with gr.Column(scale=1):
                 video_input = gr.Video(label="Upload Video")
                 style_input = gr.Radio(["live", "anime"], label="Style", value="live")
                 submit_button = gr.Button("Submit")
-
-        with gr.Row():
-            with gr.Column(scale=1):
-                video_filter = gr.Dropdown(label="Filter by Video", choices=["All"] + list(get_all_data()['video_filename'].unique()), value="All")
-                name_filter = gr.Textbox(label="Filter by Name/Cluster ID")
-
-        with gr.Row():
-            face_display = gr.HTML(create_html_grid(get_all_data()))
 
     with gr.Tab("Manage Faces"):
         rename_state = gr.State()
@@ -221,8 +214,6 @@ with gr.Blocks() as demo:
 
     def get_face_id_from_path(path):
         df = get_all_data()
-        # The path from the gallery will be a temporary file path, so we need to find the original path
-        # by matching the image content. This is not ideal, but it's a workaround.
         for index, row in df.iterrows():
             try:
                 with open(path, 'rb') as f1:
@@ -236,13 +227,12 @@ with gr.Blocks() as demo:
     def set_rename_face(evt: gr.SelectData):
         return evt.value['image']['path']
 
-    def rename_face_wrapper(face_path, name):
+    def rename_face_wrapper(face_path, name, cols):
         if not face_path or not name:
-            return "Please select a face and enter a new name.", create_html_grid(get_all_data())
+            return "Please select a face and enter a new name.", gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
         face_id = get_face_id_from_path(face_path)
         status = rename_face(face_id, name)
-        df = get_all_data()
-        return status, create_html_grid(df), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()]), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()])
+        return status, *update_galleries(cols)
 
     def add_to_merge_selection(evt: gr.SelectData, state):
         face_id = get_face_id_from_path(evt.value['image']['path'])
@@ -250,39 +240,46 @@ with gr.Blocks() as demo:
             state.append(face_id)
         return state, f"Selected {len(state)} faces."
 
-    def merge_faces_wrapper(state, name):
+    def merge_faces_wrapper(state, name, cols):
         status = merge_faces(state, name)
-        df = get_all_data()
-        return status, create_html_grid(df), [], gr.update(value=[f['face_image_path'] for i, f in df.iterrows()]), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()])
+        return status, *update_galleries(cols), []
 
     def clear_merge_selection():
         return [], "Selection cleared."
 
-    def clear_db_wrapper():
+    def clear_db_wrapper(cols):
         status = clear_database()
+        return status, *update_galleries(cols), gr.update(choices=["All"])
+
+    def update_galleries(cols):
         df = get_all_data()
-        return status, create_html_grid(df), gr.update(choices=["All"]), gr.update(value=[]), gr.update(value=[])
+        person_html = ""
+        for person, group in df.groupby('name'):
+            person_html += f"<h3>{person} ({len(group)} faces)</h3>"
+            person_html += create_gallery_html(group, cols)
+        video_html = ""
+        for video, group in df.groupby('video_filename'):
+            video_html += f"<h3>{video}</h3>"
+            video_html += create_gallery_html(group, cols)
+        chrono_df = df.sort_values(by=['upload_date', 'timestamp_seconds'])
+        chrono_html = create_gallery_html(chrono_df, cols)
+        return person_html, video_html, chrono_html, gr.update(value=[f['face_image_path'] for i, f in df.iterrows()]), gr.update(value=[f['face_image_path'] for i, f in df.iterrows()])
 
     submit_button.click(
         fn=process_video,
-        inputs=[video_input, style_input],
-        outputs=[face_display, video_filter, rename_gallery, merge_gallery]
+        inputs=[video_input, style_input, cols_dropdown],
+        outputs=[person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery]
     )
 
-    video_filter.change(fn=filter_faces, inputs=[video_filter, name_filter], outputs=face_display)
-    name_filter.change(fn=filter_faces, inputs=[video_filter, name_filter], outputs=face_display)
+    cols_dropdown.change(fn=update_galleries, inputs=[cols_dropdown], outputs=[person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery])
 
     rename_gallery.select(fn=set_rename_face, inputs=None, outputs=[rename_state])
-    rename_button.click(fn=rename_face_wrapper, inputs=[rename_state, rename_name], outputs=[rename_status, face_display, rename_gallery, merge_gallery])
+    rename_button.click(fn=rename_face_wrapper, inputs=[rename_state, rename_name, cols_dropdown], outputs=[rename_status, person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery])
     merge_gallery.select(fn=add_to_merge_selection, inputs=[merge_state], outputs=[merge_state, merge_status])
-    merge_button.click(fn=merge_faces_wrapper, inputs=[merge_state, merge_name], outputs=[merge_status, face_display, merge_state, rename_gallery, merge_gallery])
+    merge_button.click(fn=merge_faces_wrapper, inputs=[merge_state, merge_name, cols_dropdown], outputs=[merge_status, person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery, merge_state])
     clear_merge_button.click(fn=clear_merge_selection, inputs=None, outputs=[merge_state, merge_status])
-    clear_db_button.click(fn=clear_db_wrapper, inputs=None, outputs=[clear_db_status, face_display, video_filter, rename_gallery, merge_gallery])
+    clear_db_button.click(fn=clear_db_wrapper, inputs=[cols_dropdown], outputs=[clear_db_status, person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery])
 
-    demo.load(lambda: (
-        gr.update(choices=["All"] + list(get_all_data()['video_filename'].unique())),
-        gr.update(value=[f['face_image_path'] for i, f in get_all_data().iterrows()]),
-        gr.update(value=[f['face_image_path'] for i, f in get_all_data().iterrows()])
-    ), None, [video_filter, rename_gallery, merge_gallery])
+    demo.load(lambda cols: update_galleries(cols), inputs=[cols_dropdown], outputs=[person_galleries, video_galleries, chrono_gallery, rename_gallery, merge_gallery])
 
 app = gr.mount_gradio_app(app, demo, path="/")
