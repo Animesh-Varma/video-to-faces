@@ -3,7 +3,11 @@ dist/
 *.egg-info/
 *.egg
 __pycache__/
-
+.env
+.venv
+.idea/
+*.index
+temp/
 weights/
 datasets/
 /faces_output/
